@@ -6,10 +6,9 @@ import (
 	"github.com/certusone/solana_exporter/pkg/rpc"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"k8s.io/klog/v2"
 	"net/http"
 	"time"
-
-	"k8s.io/klog/v2"
 )
 const (
 	httpTimeout = 5 * time.Second
@@ -30,6 +29,7 @@ type solanaCollector struct {
 
 	totalValidatorsDesc     *prometheus.Desc
 	validatorActivatedStake *prometheus.Desc
+	validatorBalance        *prometheus.Desc
 	validatorLastVote       *prometheus.Desc
 	validatorRootSlot       *prometheus.Desc
 	validatorDelinquent     *prometheus.Desc
@@ -45,6 +45,10 @@ func NewSolanaCollector(rpcAddr string) *solanaCollector {
 			[]string{"state"}, nil),
 		validatorActivatedStake: prometheus.NewDesc(
 			"solana_validator_activated_stake",
+			"Activated stake per validator",
+			[]string{"pubkey", "nodekey"}, nil),
+		validatorBalance: prometheus.NewDesc(
+			"solana_validator_balance",
 			"Activated stake per validator",
 			[]string{"pubkey", "nodekey"}, nil),
 		validatorLastVote: prometheus.NewDesc(
@@ -71,7 +75,7 @@ func (c *solanaCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.solanaVersion
 }
 
-func (c *solanaCollector) mustEmitMetrics(ch chan<- prometheus.Metric, response *rpc.GetVoteAccountsResponse) {
+func (c *solanaCollector) mustEmitMetrics(ctx context.Context, ch chan<- prometheus.Metric, response *rpc.GetVoteAccountsResponse) {
 	ch <- prometheus.MustNewConstMetric(c.totalValidatorsDesc, prometheus.GaugeValue,
 		float64(len(response.Result.Delinquent)), "delinquent")
 	ch <- prometheus.MustNewConstMetric(c.totalValidatorsDesc, prometheus.GaugeValue,
@@ -80,6 +84,15 @@ func (c *solanaCollector) mustEmitMetrics(ch chan<- prometheus.Metric, response 
 	for _, account := range append(response.Result.Current, response.Result.Delinquent...) {
 		ch <- prometheus.MustNewConstMetric(c.validatorActivatedStake, prometheus.GaugeValue,
 			float64(account.ActivatedStake), account.VotePubkey, account.NodePubkey)
+
+		balanceResponse, _ := c.rpcClient.GetBalance(ctx, account.NodePubkey)
+		if balanceResponse != nil {
+			ch <- prometheus.MustNewConstMetric(c.validatorBalance, prometheus.GaugeValue,
+				float64(balanceResponse.Result.Value), account.VotePubkey, account.NodePubkey)
+		} else {
+			klog.V(3).Infof("Can not get balance for %v", string(account.NodePubkey))
+		}
+
 		ch <- prometheus.MustNewConstMetric(c.validatorLastVote, prometheus.GaugeValue,
 			float64(account.LastVote), account.VotePubkey, account.NodePubkey)
 		ch <- prometheus.MustNewConstMetric(c.validatorRootSlot, prometheus.GaugeValue,
@@ -112,7 +125,7 @@ func (c *solanaCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.NewInvalidMetric(c.validatorRootSlot, err)
 		ch <- prometheus.NewInvalidMetric(c.validatorDelinquent, err)
 	} else {
-		c.mustEmitMetrics(ch, accs)
+		c.mustEmitMetrics(ctx, ch, accs)
 	}
 
 	version, err := c.rpcClient.GetVersion(ctx)
